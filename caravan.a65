@@ -35,9 +35,15 @@ SPR2            = CHARMEM+120   ; the location of the 3rd sprite
 ;******************************************************************************
 ;ZEROPAGE
 ;
+vec0 =$a0
+vec1 =$a2
+vec2 =$a4
 temp0=$f0
 temp1=$f1
 temp2=$f2
+temp3=$f3
+temp4=$f4
+temp5=$f5
 SpriteBuffer=$00
 ShadowBuffer=$20
 
@@ -48,11 +54,11 @@ joy_y !byte 0
 joy_f !byte 0
 
 Sprite0
+!byte $00,$ff,$ff,$00
+!byte $00,$ff,$ff,$00
 !byte $ff,$ff,$ff,$ff
 !byte $ff,$ff,$ff,$ff
-!byte $ff,$ff,$ff,$ff
-!byte $ff,$ff,$ff,$ff
-!byte $ff,$ff,$ff,$ff
+!byte $00,$ff,$ff,$00
 !byte $ff,$ff,$ff,$ff
 !byte $ff,$ff,$ff,$ff
 !byte $ff,$ff,$ff,$ff
@@ -94,17 +100,40 @@ Sprite2
 !byte $9e
 !text "4109",0
 !word 0
-        ; init
+
+init
         ;lda #$50
         ;sta $1e00
         ;lda #$00
         ;sta $9000
         ;lda #(26|$80)
         ;sta $9002
-        lda #$00
+        lda #$04|$80    ; X columns, odd screen page ($1e00)
         sta $9002
-        lda #$00<<1
+        lda #$02<<1     ; X rows, 8x8 chars
         sta $9003
+        lda #$ff        ; chars @ $1c000, screen @ $1e00
+        sta $9005
+    
+        ; set up bitmap
+        ldy #$01:ldx #$00
+        stx $1e00:sty $9600
+        inx:stx $1e04:sty $9601
+        inx:stx $1e01:sty $9602
+        inx:stx $1e05:sty $9603
+        inx:stx $1e02:sty $9604
+        inx:stx $1e06:sty $9605
+        inx:stx $1e03:sty $9606
+        inx:stx $1e07:sty $9607
+
+        ldx #4*16
+        lda #$00
+-       sta $1c00,x
+        dex
+        bpl -
+        ldx #$07
+        ldy #$00
+        jsr SpriteOn
 
 
     ; init the stable raster irq
@@ -169,10 +198,10 @@ pointers:
 
 
 main_loop
-        lda #$08
+        lda #$0a
         cmp $9004
         bne *-3
-        lda #$06
+        lda #$08
         sta scroll_stride
 read_joy
         lda #$00
@@ -185,7 +214,7 @@ read_joy
         lda #$04
         bit temp0       ; up?
         bne +
-        ldx #4          ; double stride
+        ldx #5          ; double stride
         stx scroll_stride
 +       asl
         bit temp0       ; down?
@@ -204,8 +233,21 @@ read_joy
         inc joy_x
 +       jmp main_loop
 
+
+;******************************************************************************
+delayx
+; delay for 6 to 50 cycles
+; jsr delayx + (delay_cycles
+;
+!fill   (50-8),$c9
+delay7  !byte $24
+delay6  nop
+delay4  sta $900f
+        rts
+
 !align 255,0
 ;******************************************************************************
+!zone IRQ
 irq
 .sky = temp0
         lda $9114   ; get the NMI timer A
@@ -234,6 +276,7 @@ irq
         sta .sky          ; 3
         nop
 
+; foreach raster line
 do_line
 line_count=*+1
         ldx sky_delays  ; 4
@@ -285,8 +328,10 @@ ground_col2=*+1
 
         lda $9004       ; 4
         bpl do_line     ; 3
+
+; update the delay values to produce a scrolling effect
 .done
-        lda joy_y
+        lda #$10 ;joy_y
         sta $9001
         lda #<sky_delays
         sta line_count
@@ -340,11 +385,12 @@ scroll_speed=*+1
 ; if !0, scroll the background
 scroll_start    !byte 0
 scroll_stride   !byte 0
-.scroll_speed   !byte 8
+.scroll_speed   !byte 1
 scroll_entry    !byte 0
-delay_pattern   !byte 3
 
 !align 255,0
+
+; color table for each line of the sky
 sky_colors
 !byte $00
 !byte $04
@@ -366,8 +412,11 @@ sky_colors
 !byte $01
 !byte $03
 !byte $01
+
+; delay table for each line of the sky
 sky_delays
 !byte $04,$02,$0f,$01,$06,$01,$01,$01,$01,$00,$02,$00,$01,$02,$00,$01,$00,$00,$00,$00
+
 ; a table for how long (in lines) to display the corresponding color
 delay_tab
 !byte 0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3
@@ -497,53 +546,102 @@ COLOR_AUX = *
 !byte $c0,$30,$0c,$03   ; %11 table
 
 ;******************************************************************************
+!zone SpriteDrawing
 SpriteOn
 ;
-.sprbm=SPR0
-.next = temp0
+.next       = temp0
+.scroll     = temp3
+.prev       = temp4
+.cnt        = temp5
+.next_buff  = $00
+SPRITE_BM   = $1c00
+        ; scroll = (7 - (X & 7))
         txa
-        beq .blit               ; no pixel scroll
-        cmp #$03
-        beq .blit               ; half-char scroll (no pixel scroll)
-
+        and #$07
+        cmp #$07
+        beq .pre
+        sta .scroll
+        asl                     ; * 3
+        clc
+        adc .scroll
         tax
 
-        lda #$2c
-        sta .sh2
-        sta .sh3
-        dex 
-        beq .blit
-        sta .sh1
-        sta .sh2
-.blit
-        ldx sprite_w_times_h
-.l0     ldy sprite_h
-.l1     lda SPRITE,x            ; 4
-.sh0    lsr                     ; 2
-        ror .next               ; 3
-.sh1    lsr                     ; 2
-        ror .next               ; 3
-.sh2    lsr                     ; 2 becomes $2C (BIT ABS) for 1 pixel shift
-        ror .next               ; 3
-.sh3    lsr                     ; 2 becomes $2C for 1 pixel shift
-        ror .next               ; 3
+        ; replace "LSR:ROR ZP,X" with "JMP .blit"
+        lda #$4c                ; JMP
+        sta .shsmc,x
+        lda #<.put      
+        sta .shsmc+1,x
+        lda #>.put
+        sta .shsmc+2,x
+.pre
+        ; setup src and dst vectors
+        ldx #<Sprite0
+        ldy #>Sprite0
+        stx .src
+        sty .src+1
+        ldx #<SPRITE_BM
+        ldy #>SPRITE_BM
+        stx .dst
+        sty .dst+1
 
-        ora .next               ; 3
-        sta SPRITE_BM,y         ; 5
-        dex                     ; 2
-        dey                     ; 2
-        bpl .l1                 ; 3
+        ; clear next buffer (TODO: better way?)
+        ldy #15
+        lda #$00
+-       sta .next_buff,y
+        dey
+        bpl -
 
-        tya
-        sec
-        sbc #$10
-        tay
+        lda #$00
+        ldy #$04
+
+        ; blit loop
+.blit   ldx #15         ; sprite_w_times_h
+
+.l0     lda .next_buff,x
+        sta .prev
+        ; get a row of pixels and shift them
+.src=*+1:lda $0000,x
+.shsmc  lsr
+        ror .next_buff,x
+        lsr
+        ror .next_buff,x
+        lsr
+        ror .next_buff,x
+        lsr
+        ror .next_buff,x
+        lsr
+        ror .next_buff,x
+        lsr
+        ror .next_buff,x
+        lsr
+        ror .next_buff,x
+
+        ; copy to sprite bitmap
+.put    ora .prev
+.dst=*+1:sta $0000,x
+        dex
         bpl .l0
 
-        lda #$4a                ; LSR
-        sta .sh0
-        sta .sh1
-        sta .sh2
-        sta .sh3
-        rts
+        ; update vectors
+        lda .src
+        adc #16
+        sta .src
+        lda .dst
+        adc #16
+        sta .dst
 
+        ; if (--.Y != 0) loop
+        dey
+        bne .blit
+
+        ; restore smc
+        ldx .scroll
+        lda #$4a                ; LSR
+        sta .shsmc,x
+        lda #$76                ; ROR ZPG,X
+        sta .shsmc+1,x
+        lda #.next_buff
+        sta .shsmc+2,x
+        
+        ; done
+        rts
